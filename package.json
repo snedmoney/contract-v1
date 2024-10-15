@@ -1,3 +1,11 @@
 {
-  "name": "hardhat-project"
+  "name": "payment-contract",
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox-viem": "^3.0.0",
+    "hardhat": "^2.22.10"
+  },
+  "dependencies": {
+    "@openzeppelin/contracts": "^5.0.2",
+    "@uniswap/v3-periphery": "^1.4.4"
+  }
 }

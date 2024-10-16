@@ -31,8 +31,10 @@ contract SnedPayment is ReentrancyGuard, Ownable, Pausable {
         address indexed sender,
         bytes32 indexed recipient,
         uint16 recipientChain,
-        uint256 amount,
-        uint64 sequence
+        address tokenOut,
+        uint256 amountOut,
+        uint64 sequence,
+        string paymentId
     );
     event SwapExecuted(
         address indexed tokenIn,
@@ -65,19 +67,62 @@ contract SnedPayment is ReentrancyGuard, Ownable, Pausable {
         bytes32 recipient,
         uint16 recipientChain,
         uint256 arbiterFee,
-        uint256 deadline
+        uint256 deadline,
+        string calldata paymentId
     ) external nonReentrant whenNotPaused {
         require(recipient != bytes32(0), "Invalid recipient");
         require(amountOut > 0, "Invalid amount out");
         require(amountInMaximum > 0, "Invalid amount in maximum");
         require(deadline > block.timestamp, "Deadline must be in the future");
 
-        address tokenIn = route[0];
-        address tokenOut = route[route.length - 1];
-        bytes memory path = _encodePath(route, fees);
+        address tokenIn = route[route.length - 1];
+        address tokenOut = route[0];
 
-        uint256 initialBalance = IERC20(tokenIn).balanceOf(msg.sender);
-        require(initialBalance >= amountInMaximum, "Insufficient balance");
+        uint256 amountIn = _executeSwap(
+            route,
+            fees,
+            amountOut,
+            amountInMaximum,
+            deadline
+        );
+
+        emit SwapExecuted(tokenIn, tokenOut, amountIn, amountOut);
+
+        if (amountIn < amountInMaximum) {
+            IERC20(tokenIn).safeTransfer(
+                msg.sender,
+                amountInMaximum - amountIn
+            );
+        }
+
+        uint64 sequence = _executeBridgeTransfer(
+            tokenOut,
+            amountOut,
+            recipientChain,
+            recipient,
+            arbiterFee
+        );
+
+        emit PaymentMade(
+            msg.sender,
+            recipient,
+            recipientChain,
+            tokenOut,
+            amountOut,
+            sequence,
+            paymentId
+        );
+    }
+
+    function _executeSwap(
+        address[] calldata route,
+        uint24[] calldata fees,
+        uint256 amountOut,
+        uint256 amountInMaximum,
+        uint256 deadline
+    ) private returns (uint256) {
+        address tokenIn = route[route.length - 1];
+        bytes memory path = _encodePath(route, fees);
 
         IERC20(tokenIn).safeTransferFrom(
             msg.sender,
@@ -98,38 +143,30 @@ contract SnedPayment is ReentrancyGuard, Ownable, Pausable {
                 amountInMaximum: amountInMaximum
             });
 
-        uint256 amountIn = swapRouter.exactOutput(params);
+        return swapRouter.exactOutput(params);
+    }
 
-        emit SwapExecuted(tokenIn, tokenOut, amountIn, amountOut);
-
-        if (amountIn < amountInMaximum) {
-            IERC20(tokenIn).safeTransfer(
-                msg.sender,
-                amountInMaximum - amountIn
-            );
-        }
-
+    function _executeBridgeTransfer(
+        address tokenOut,
+        uint256 amountOut,
+        uint16 recipientChain,
+        bytes32 recipient,
+        uint256 arbiterFee
+    ) private returns (uint64) {
         IERC20(tokenOut).safeIncreaseAllowance(
             address(wormholeBridge),
             amountOut
         );
 
-        uint64 sequence = wormholeBridge.transferTokens(
-            tokenOut,
-            amountOut,
-            recipientChain,
-            recipient,
-            arbiterFee,
-            _getAndIncrementNonce()
-        );
-
-        emit PaymentMade(
-            msg.sender,
-            recipient,
-            recipientChain,
-            amountOut,
-            sequence
-        );
+        return
+            wormholeBridge.transferTokens(
+                tokenOut,
+                amountOut,
+                recipientChain,
+                recipient,
+                arbiterFee,
+                _getAndIncrementNonce()
+            );
     }
 
     function rescueTokens(address token, uint256 amount) external onlyOwner {
@@ -163,15 +200,11 @@ contract SnedPayment is ReentrancyGuard, Ownable, Pausable {
     ) private pure returns (bytes memory) {
         require(addresses.length == fees.length + 1, "Invalid path length");
 
-        bytes memory path;
-
+        bytes memory path = new bytes(0);
         for (uint256 i = 0; i < fees.length; i++) {
             path = abi.encodePacked(path, addresses[i], fees[i]);
         }
-
-        path = abi.encodePacked(path, addresses[addresses.length - 1]);
-
-        return path;
+        return abi.encodePacked(path, addresses[addresses.length - 1]);
     }
 
     function _getAndIncrementNonce() private returns (uint32) {

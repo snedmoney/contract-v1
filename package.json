@@ -1,5 +1,9 @@
 {
   "name": "payment-contract",
+  "scripts": {
+    "flatten": "hardhat flatten > artifacts/SnedPayment.sol",
+    "compile": "hardhat compile"
+  },
   "devDependencies": {
     "@nomicfoundation/hardhat-toolbox-viem": "^3.0.0",
     "hardhat": "^2.22.10"

@@ -2,7 +2,8 @@
   "name": "payment-contract",
   "scripts": {
     "flatten": "hardhat flatten > artifacts/SnedPayment.sol",
-    "compile": "hardhat compile"
+    "compile": "hardhat compile",
+    "deploy:arbitrum": "hardhat ignition deploy ./ignition/modules/SnedPayment.ts --network arbitrum --parameters '{\"networkId\": 42161 }' --verbose"
   },
   "devDependencies": {
     "@nomicfoundation/hardhat-toolbox-viem": "^3.0.0",

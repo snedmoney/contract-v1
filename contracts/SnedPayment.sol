@@ -9,14 +9,18 @@ import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/utils/Pausable.sol";
 
 interface IWormhole {
-    function transferTokens(
+    function transferTokensWithPayload(
         address token,
         uint256 amount,
-        uint16 recipientChain,
-        bytes32 recipient,
-        uint256 arbiterFee,
-        uint32 nonce
+        uint16 destWormChainId,
+        bytes32 bridgeRecipient,
+        uint32 nonce,
+        bytes memory payload
     ) external returns (uint64);
+
+    function completeTransferWithPayload(
+        bytes memory encodedVm
+    ) external returns (bytes memory);
 }
 
 contract SnedPayment is ReentrancyGuard, Ownable, Pausable {
@@ -26,29 +30,58 @@ contract SnedPayment is ReentrancyGuard, Ownable, Pausable {
     IWormhole public wormholeBridge;
 
     uint32 private nonce;
+    uint16 public currentWormChainId;
 
-    event PaymentMade(
-        address indexed sender,
-        bytes32 indexed recipient,
-        uint16 recipientChain,
+    event BridgePaymentInitiated(
+        string indexed paymentId,
+        address indexed src,
+        address indexed dest,
+        uint16 destWormChainId,
         address tokenOut,
         uint256 amountOut,
-        uint64 sequence,
-        string paymentId
+        uint64 sequence
     );
+
+    event PaymentSuccessful(
+        string indexed paymentId,
+        address indexed dest,
+        address token,
+        uint256 amount
+    );
+
     event SwapExecuted(
-        address indexed tokenIn,
-        address indexed tokenOut,
+        string indexed paymentId,
+        address tokenIn,
+        address tokenOut,
         uint256 amountIn,
         uint256 amountOut
     );
-    event BridgeAddressUpdated(address newAddress);
-    event RouterAddressUpdated(address newAddress);
+
+    struct SwapParams {
+        address[] route;
+        uint24[] fees;
+        uint256 amountInMaximum;
+        uint256 deadline;
+    }
+
+    struct PaymentParams {
+        string paymentId;
+        address destAddress;
+        address tokenIn;
+        address tokenOut;
+        uint256 amountOut;
+    }
+
+    struct BridgeParams {
+        uint16 destWormChainId;
+        bytes32 bridgeRecipient;
+    }
 
     constructor(
         address _owner,
         address _swapRouter,
-        address _wormholeBridge
+        address _wormholeBridge,
+        uint16 _currentWormChainId
     ) Ownable(_owner) {
         require(_swapRouter != address(0), "Invalid swap router address");
         require(
@@ -57,133 +90,182 @@ contract SnedPayment is ReentrancyGuard, Ownable, Pausable {
         );
         swapRouter = ISwapRouter(_swapRouter);
         wormholeBridge = IWormhole(_wormholeBridge);
+        currentWormChainId = _currentWormChainId;
     }
 
     function makePayment(
-        address[] calldata route,
-        uint24[] calldata fees,
-        uint256 amountOut,
-        uint256 amountInMaximum,
-        bytes32 recipient,
-        uint16 recipientChain,
-        uint256 arbiterFee,
-        uint256 deadline,
-        string calldata paymentId
+        SwapParams calldata swapParams,
+        PaymentParams calldata paymentParams,
+        BridgeParams calldata bridgeParams
     ) external nonReentrant whenNotPaused {
-        require(recipient != bytes32(0), "Invalid recipient");
-        require(amountOut > 0, "Invalid amount out");
-        require(amountInMaximum > 0, "Invalid amount in maximum");
-        require(deadline > block.timestamp, "Deadline must be in the future");
-
-        address tokenIn = route[route.length - 1];
-        address tokenOut = route[0];
-
-        uint256 amountIn = _executeSwap(
-            route,
-            fees,
-            amountOut,
-            amountInMaximum,
-            deadline
+        require(
+            paymentParams.destAddress != address(0),
+            "Invalid dest address"
         );
 
-        emit SwapExecuted(tokenIn, tokenOut, amountIn, amountOut);
-
-        if (amountIn < amountInMaximum) {
-            IERC20(tokenIn).safeTransfer(
-                msg.sender,
-                amountInMaximum - amountIn
-            );
+        if (paymentParams.tokenIn == paymentParams.tokenOut) {
+            // Same token and same chain - Direct transfer
+            if (bridgeParams.destWormChainId == currentWormChainId) {
+                _transferToDest(
+                    paymentParams.tokenOut,
+                    paymentParams.destAddress,
+                    paymentParams.amountOut,
+                    paymentParams.paymentId
+                );
+            }
+        } else {
+            // Different src and dest token - Swap
+            _executeSwap(swapParams, paymentParams);
         }
 
-        uint64 sequence = _executeBridgeTransfer(
-            tokenOut,
-            amountOut,
-            recipientChain,
-            recipient,
-            arbiterFee
+        if (bridgeParams.destWormChainId == currentWormChainId) {
+            _transferToDest(
+                paymentParams.tokenOut,
+                paymentParams.destAddress,
+                paymentParams.amountOut,
+                paymentParams.paymentId
+            );
+        } else {
+            bytes memory payload = abi.encode(
+                paymentParams.paymentId,
+                paymentParams.destAddress
+            );
+            _executeBridgeTransfer(
+                paymentParams.tokenOut,
+                paymentParams.amountOut,
+                bridgeParams.destWormChainId,
+                bridgeParams.bridgeRecipient,
+                payload,
+                paymentParams
+            );
+        }
+    }
+
+    function completePayment(
+        bytes memory encodedVm
+    ) external nonReentrant whenNotPaused onlyOwner {
+        bytes memory transferData = wormholeBridge.completeTransferWithPayload(
+            encodedVm
         );
 
-        emit PaymentMade(
-            msg.sender,
-            recipient,
-            recipientChain,
-            tokenOut,
-            amountOut,
-            sequence,
-            paymentId
+        (
+            address token,
+            uint256 amount,
+            bytes memory transferPayload
+        ) = parseTransferData(transferData);
+        (string memory paymentId, address destAddress) = abi.decode(
+            transferPayload,
+            (string, address)
         );
+
+        _transferToDest(token, destAddress, amount, paymentId);
+    }
+
+    function _transferToDest(
+        address token,
+        address destAddress,
+        uint256 amount,
+        string memory paymentId
+    ) internal {
+        IERC20(token).safeTransfer(destAddress, amount);
+        emit PaymentSuccessful(paymentId, destAddress, token, amount);
     }
 
     function _executeSwap(
-        address[] calldata route,
-        uint24[] calldata fees,
-        uint256 amountOut,
-        uint256 amountInMaximum,
-        uint256 deadline
-    ) private returns (uint256) {
-        address tokenIn = route[route.length - 1];
-        bytes memory path = _encodePath(route, fees);
+        SwapParams calldata swapParams,
+        PaymentParams calldata paymentParams
+    ) private {
+        require(paymentParams.amountOut > 0, "Invalid amount out");
+        require(swapParams.amountInMaximum > 0, "Invalid amount in maximum");
+        require(
+            swapParams.deadline > block.timestamp,
+            "Deadline must be in the future"
+        );
+
+        address tokenIn = swapParams.route[swapParams.route.length - 1];
+        address tokenOut = swapParams.route[0];
+
+        require(tokenIn != paymentParams.tokenIn, "Invalid tokenIn address");
+        require(tokenOut != paymentParams.tokenOut, "Invalid tokenIn address");
+
+        bytes memory path = _encodePath(swapParams.route, swapParams.fees);
 
         IERC20(tokenIn).safeTransferFrom(
             msg.sender,
             address(this),
-            amountInMaximum
+            swapParams.amountInMaximum
         );
         IERC20(tokenIn).safeIncreaseAllowance(
             address(swapRouter),
-            amountInMaximum
+            swapParams.amountInMaximum
         );
 
         ISwapRouter.ExactOutputParams memory params = ISwapRouter
             .ExactOutputParams({
                 path: path,
                 recipient: address(this),
-                deadline: deadline,
-                amountOut: amountOut,
-                amountInMaximum: amountInMaximum
+                deadline: swapParams.deadline,
+                amountOut: paymentParams.amountOut,
+                amountInMaximum: swapParams.amountInMaximum
             });
 
-        return swapRouter.exactOutput(params);
+        uint256 amountIn = swapRouter.exactOutput{value: msg.value}(params);
+        uint256 consumedAmountIn = swapParams.amountInMaximum;
+
+        if (amountIn < swapParams.amountInMaximum) {
+            consumedAmountIn = swapParams.amountInMaximum - amountIn;
+            IERC20(tokenIn).safeTransfer(
+                msg.sender,
+                swapParams.amountInMaximum - amountIn
+            );
+        }
+
+        emit SwapExecuted(
+            paymentParams.paymentId,
+            tokenIn,
+            tokenOut,
+            consumedAmountIn,
+            paymentParams.amountOut
+        );
     }
 
     function _executeBridgeTransfer(
         address tokenOut,
         uint256 amountOut,
-        uint16 recipientChain,
-        bytes32 recipient,
-        uint256 arbiterFee
-    ) private returns (uint64) {
+        uint16 destWormChainId,
+        bytes32 bridgeRecipient,
+        bytes memory payload,
+        PaymentParams memory paymentParams
+    ) private {
+        require(bridgeRecipient != bytes32(0), "Invalid recipient");
         IERC20(tokenOut).safeIncreaseAllowance(
             address(wormholeBridge),
             amountOut
         );
 
-        return
-            wormholeBridge.transferTokens(
-                tokenOut,
-                amountOut,
-                recipientChain,
-                recipient,
-                arbiterFee,
-                _getAndIncrementNonce()
-            );
+        uint64 sequence = wormholeBridge.transferTokensWithPayload(
+            tokenOut,
+            amountOut,
+            destWormChainId,
+            bridgeRecipient,
+            _getAndIncrementNonce(),
+            payload
+        );
+
+        emit BridgePaymentInitiated(
+            paymentParams.paymentId,
+            msg.sender,
+            paymentParams.destAddress,
+            destWormChainId,
+            tokenOut,
+            amountOut,
+            sequence
+        );
     }
 
     function rescueTokens(address token, uint256 amount) external onlyOwner {
         require(amount > 0, "Invalid amount");
         IERC20(token).safeTransfer(owner(), amount);
-    }
-
-    function updateBridgeAddress(address newBridge) external onlyOwner {
-        require(newBridge != address(0), "Invalid bridge address");
-        wormholeBridge = IWormhole(newBridge);
-        emit BridgeAddressUpdated(newBridge);
-    }
-
-    function updateRouterAddress(address newRouter) external onlyOwner {
-        require(newRouter != address(0), "Invalid router address");
-        swapRouter = ISwapRouter(newRouter);
-        emit RouterAddressUpdated(newRouter);
     }
 
     function pause() external onlyOwner {
@@ -205,6 +287,19 @@ contract SnedPayment is ReentrancyGuard, Ownable, Pausable {
             path = abi.encodePacked(path, addresses[i], fees[i]);
         }
         return abi.encodePacked(path, addresses[addresses.length - 1]);
+    }
+
+    function parseTransferData(
+        bytes memory transferData
+    )
+        private
+        pure
+        returns (address token, uint256 amount, bytes memory transferPayload)
+    {
+        (token, amount, , transferPayload) = abi.decode(
+            transferData,
+            (address, uint256, bytes32, bytes)
+        );
     }
 
     function _getAndIncrementNonce() private returns (uint32) {

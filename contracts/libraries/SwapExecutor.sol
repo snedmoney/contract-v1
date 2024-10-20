@@ -2,54 +2,31 @@
 pragma solidity ^0.8.19;
 
 import "@uniswap/v3-periphery/contracts/interfaces/ISwapRouter.sol";
-import "@pancakeswap/v3-periphery/contracts/interfaces/ISwapRouter.sol" as PancakeSwapRouter;
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "./PaymentStructs.sol";
 
+interface IPancakeSwapRouter {
+    struct ExactInputParams {
+        bytes path;
+        address recipient;
+        uint256 amountIn;
+        uint256 amountOutMinimum;
+    }
+
+    function exactInput(
+        ExactInputParams calldata params
+    ) external payable returns (uint256 amountOut);
+}
+
 library SwapExecutor {
     using SafeERC20 for IERC20;
 
-    function executeUniswap(
-        ISwapRouter uniswapRouter,
-        PaymentStructs.UniswapParams memory params
-    ) internal returns (uint256) {
-        require(params.amountIn > 0, "Invalid amount in");
-        require(params.amountOutMinimum > 0, "Invalid amount out minimum");
-        require(
-            params.deadline > block.timestamp,
-            "Deadline must be in the future"
-        );
+    uint8 constant SWAP_TYPE_UNISWAP = 0;
+    uint8 constant SWAP_TYPE_PANCAKESWAP = 1;
 
-        address tokenIn = params.route[0];
-
-        bytes memory path = _encodePath(params.route, params.fees);
-
-        IERC20(tokenIn).safeTransferFrom(
-            msg.sender,
-            address(this),
-            params.amountIn
-        );
-        IERC20(tokenIn).safeIncreaseAllowance(
-            address(uniswapRouter),
-            params.amountIn
-        );
-
-        ISwapRouter.ExactInputParams memory uniswapParams = ISwapRouter
-            .ExactInputParams({
-                path: path,
-                recipient: address(this),
-                deadline: params.deadline,
-                amountIn: params.amountIn,
-                amountOutMinimum: params.amountOutMinimum
-            });
-
-        return uniswapRouter.exactInput(uniswapParams);
-    }
-
-    function executePancakeswap(
-        PancakeSwapRouter.ISwapRouter pancakeswapRouter,
-        PaymentStructs.PancakeswapParams memory params,
+    function executeSwap(
+        PaymentStructs.SwapParams memory params,
         uint256 amountIn
     ) internal returns (uint256) {
         require(amountIn > 0, "Invalid amount in");
@@ -59,27 +36,58 @@ library SwapExecutor {
             "Deadline must be in the future"
         );
 
-        address tokenIn = params.route[0];
+        if (params.swapType == SWAP_TYPE_UNISWAP) {
+            return _executeUniswap(params, amountIn);
+        } else if (params.swapType == SWAP_TYPE_PANCAKESWAP) {
+            return _executePancakeswap(params, amountIn);
+        } else {
+            revert("Invalid swap type");
+        }
+    }
 
-        IERC20(tokenIn).safeIncreaseAllowance(
-            address(pancakeswapRouter),
-            amountIn
-        );
+    function _executeUniswap(
+        PaymentStructs.SwapParams memory params,
+        uint256 amountIn
+    ) private returns (uint256) {
+        address tokenIn = params.route[0];
+        ISwapRouter router = ISwapRouter(params.router);
+
+        IERC20(tokenIn).safeIncreaseAllowance(address(router), amountIn);
 
         bytes memory path = _encodePath(params.route, params.fees);
 
-        PancakeSwapRouter.ISwapRouter.ExactInputParams
-            memory pancakeParams = PancakeSwapRouter
-                .ISwapRouter
-                .ExactInputParams({
-                    path: path,
-                    recipient: address(this),
-                    deadline: params.deadline,
-                    amountIn: amountIn,
-                    amountOutMinimum: params.amountOutMinimum
-                });
+        ISwapRouter.ExactInputParams memory swapParams = ISwapRouter
+            .ExactInputParams({
+                path: path,
+                recipient: address(this),
+                deadline: params.deadline,
+                amountIn: amountIn,
+                amountOutMinimum: params.amountOutMinimum
+            });
 
-        return pancakeswapRouter.exactInput(pancakeParams);
+        return router.exactInput(swapParams);
+    }
+
+    function _executePancakeswap(
+        PaymentStructs.SwapParams memory params,
+        uint256 amountIn
+    ) private returns (uint256) {
+        address tokenIn = params.route[0];
+        IPancakeSwapRouter router = IPancakeSwapRouter(params.router);
+
+        IERC20(tokenIn).safeIncreaseAllowance(address(router), amountIn);
+
+        bytes memory path = _encodePath(params.route, params.fees);
+
+        IPancakeSwapRouter.ExactInputParams
+            memory swapParams = IPancakeSwapRouter.ExactInputParams({
+                path: path,
+                recipient: address(this),
+                amountIn: amountIn,
+                amountOutMinimum: params.amountOutMinimum
+            });
+
+        return router.exactInput(swapParams);
     }
 
     function _encodePath(

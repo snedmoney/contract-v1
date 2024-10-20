@@ -3,13 +3,21 @@ pragma solidity ^0.8.19;
 
 interface IWormhole {
     struct TransferWithPayload {
+        // PayloadID uint8 = 3
         uint8 payloadID;
+        // Amount being transferred (big-endian uint256)
         uint256 amount;
+        // Address of the token. Left-zero-padded if shorter than 32 bytes
         bytes32 tokenAddress;
+        // Chain ID of the token
         uint16 tokenChain;
+        // Address of the recipient. Left-zero-padded if shorter than 32 bytes
         bytes32 to;
+        // Chain ID of the recipient
         uint16 toChain;
+        // Address of the message sender. Left-zero-padded if shorter than 32 bytes
         bytes32 fromAddress;
+        // An arbitrary payload
         bytes payload;
     }
 
@@ -26,7 +34,7 @@ interface IWormhole {
         bytes memory encodedVm
     ) external returns (bytes memory);
 
-    function _parseTransferCommon(
+    function parseTransferWithPayload(
         bytes memory encoded
     ) external pure returns (TransferWithPayload memory transfer);
 }

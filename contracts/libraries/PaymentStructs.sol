@@ -2,19 +2,13 @@
 pragma solidity ^0.8.19;
 
 library PaymentStructs {
-    struct UniswapParams {
-        address[] route;
-        uint24[] fees;
-        uint256 amountIn;
-        uint256 amountOutMinimum;
-        uint256 deadline;
-    }
-
-    struct PancakeswapParams {
+    struct SwapParams {
+        address router;
         address[] route;
         uint24[] fees;
         uint256 amountOutMinimum;
         uint256 deadline;
+        uint8 swapType;
     }
 
     struct PaymentParams {
@@ -22,6 +16,7 @@ library PaymentStructs {
         address destAddress;
         address tokenIn;
         address tokenOut;
+        uint256 amountIn;
     }
 
     struct BridgeParams {

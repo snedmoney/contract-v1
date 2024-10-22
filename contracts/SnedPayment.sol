@@ -20,8 +20,9 @@ contract SnedPayment is ReentrancyGuard, Ownable, Pausable {
 
     uint32 private nonce;
     uint16 public currentWormChainId;
-    uint256 public constant COMMISSION_RATE = 100; // 1% commission (100 basis points)
+    uint256 public commissionRate = 100; // Initial commission rate of 1% (100 basis points)
     uint256 public constant BASIS_POINTS = 10000;
+    uint256 public constant MAX_COMMISSION_RATE = 200; // Maximum 2% commission (200 basis points)
 
     constructor(
         address _owner,
@@ -33,6 +34,7 @@ contract SnedPayment is ReentrancyGuard, Ownable, Pausable {
             _wormholeBridge != address(0),
             "Invalid wormhole bridge address"
         );
+
         wormholeBridge = IWormhole(_wormholeBridge);
         currentWormChainId = _currentWormChainId;
 
@@ -40,6 +42,14 @@ contract SnedPayment is ReentrancyGuard, Ownable, Pausable {
             require(_initialRouters[i] != address(0), "Invalid router address");
             allowlistedRouters[_initialRouters[i]] = true;
         }
+    }
+
+    function setCommissionRate(uint256 newRate) external onlyOwner {
+        require(
+            newRate <= MAX_COMMISSION_RATE,
+            "Commission rate exceeds maximum commision rate of 2%"
+        );
+        commissionRate = newRate;
     }
 
     function addRouterToAllowlist(
@@ -218,8 +228,8 @@ contract SnedPayment is ReentrancyGuard, Ownable, Pausable {
 
     function _getAmountAfterCommision(
         uint256 amount
-    ) internal pure returns (uint256) {
-        uint256 commission = (amount * COMMISSION_RATE) / BASIS_POINTS;
+    ) internal view returns (uint256) {
+        uint256 commission = (amount * commissionRate) / BASIS_POINTS;
         return amount - commission;
     }
 

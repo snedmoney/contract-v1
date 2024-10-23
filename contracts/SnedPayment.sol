@@ -7,6 +7,8 @@ import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/utils/Pausable.sol";
+import "@pythnetwork/pyth-sdk-solidity/IPyth.sol";
+import "@pythnetwork/pyth-sdk-solidity/PythStructs.sol";
 import "./interfaces/IWormhole.sol";
 import "./libraries/SwapExecutor.sol";
 import "./libraries/PaymentEvents.sol";
@@ -17,6 +19,8 @@ contract SnedPayment is ReentrancyGuard, Ownable, Pausable {
 
     mapping(address => bool) public allowlistedRouters;
     IWormhole private wormholeBridge;
+    IPyth pythContract;
+    bytes32 priceId;
 
     uint32 private nonce;
     uint16 public currentWormChainId;
@@ -28,7 +32,9 @@ contract SnedPayment is ReentrancyGuard, Ownable, Pausable {
         address _owner,
         address[] memory _initialRouters,
         address _wormholeBridge,
-        uint16 _currentWormChainId
+        uint16 _currentWormChainId,
+        address _pythContract,
+        bytes32 _priceId
     ) Ownable(_owner) {
         require(
             _wormholeBridge != address(0),
@@ -37,19 +43,13 @@ contract SnedPayment is ReentrancyGuard, Ownable, Pausable {
 
         wormholeBridge = IWormhole(_wormholeBridge);
         currentWormChainId = _currentWormChainId;
+        pythContract = IPyth(_pythContract);
+        priceId = _priceId;
 
         for (uint i = 0; i < _initialRouters.length; i++) {
             require(_initialRouters[i] != address(0), "Invalid router address");
             allowlistedRouters[_initialRouters[i]] = true;
         }
-    }
-
-    function setCommissionRate(uint256 newRate) external onlyOwner {
-        require(
-            newRate <= MAX_COMMISSION_RATE,
-            "Commission rate exceeds maximum commision rate of 2%"
-        );
-        commissionRate = newRate;
     }
 
     function addRouterToAllowlist(
@@ -128,9 +128,9 @@ contract SnedPayment is ReentrancyGuard, Ownable, Pausable {
 
     function completePayment(
         bytes memory encodedVm,
-        PaymentStructs.SwapParams[] calldata swapParamsArray,
-        uint256 fee
+        PaymentStructs.SwapParams[] calldata swapParamsArray
     ) external nonReentrant whenNotPaused onlyOwner {
+        uint256 startGas = gasleft();
         (
             uint256 amountIn,
             bytes32 paymentId,
@@ -138,21 +138,26 @@ contract SnedPayment is ReentrancyGuard, Ownable, Pausable {
             address tokenAddress
         ) = _completeTransfer(encodedVm);
 
-        require(amountIn > fee, "Amount must be greater than fee");
-        uint256 amountInAfterFee = amountIn - fee;
 
         uint256 amountOut;
         address tokenOut;
 
         if (swapParamsArray.length == 0) {
-            amountOut = amountInAfterFee;
+            amountOut = amountIn;
             tokenOut = tokenAddress;
         } else {
-            amountOut = _executeSwaps(swapParamsArray, amountInAfterFee);
+            amountOut = _executeSwaps(swapParamsArray, amountIn);
             tokenOut = _getLastTokenInRoute(swapParamsArray);
         }
+        uint256 gasUsed = startGas - gasleft();
+        uint256 gasPrice = tx.gasprice;
 
-        _transferToDest(tokenOut, destAddress, amountOut, paymentId);
+        uint256 gasFee = _calculateGasFee(gasUsed, gasPrice);
+
+        require(amountOut > gasFee, "Amount must be greater than fee");
+        uint256 amountOutAfterFee = amountOut - gasFee;
+
+        _transferToDest(tokenOut, destAddress, amountOutAfterFee, paymentId);
     }
 
     function _executeSwaps(
@@ -296,5 +301,53 @@ contract SnedPayment is ReentrancyGuard, Ownable, Pausable {
 
     function _getAndIncrementNonce() private returns (uint32) {
         return nonce++;
+    }
+
+    function _calculateGasFee(uint256 gasUsed, uint256 gasPrice) private view returns (uint256 cost) {
+        uint256 gasCostInWei;
+        unchecked {
+            gasCostInWei = gasUsed * gasPrice;
+        }
+        require(gasPrice == 0 || gasCostInWei / gasPrice == gasUsed, "Gas cost calculation overflow");
+
+        PythStructs.Price memory pythPrice = pythContract.getPriceUnsafe(priceId);
+
+        int64 price = pythPrice.price;
+        int32 expo = pythPrice.expo;
+
+        require(price > 0, "Invalid ETH price");
+        require(expo <= 0, "Invalid price exponent");
+
+        uint256 gasUsdPrice = uint256(uint64(price));
+        
+        uint256 scalingFactor = 10 ** uint32(-expo);
+        gasUsdPrice = (gasUsdPrice * 1e18) / scalingFactor;
+
+        uint256 intermediateResult;
+        unchecked {
+            intermediateResult = gasCostInWei * gasUsdPrice;
+        }
+        require(gasUsdPrice == 0 || intermediateResult / gasUsdPrice == gasCostInWei, "USD conversion overflow");
+
+        uint256 gasCost = intermediateResult / 1e18;
+
+        cost = gasCost / 1e12;
+
+        uint256 buffer = (cost * 10) / 100;
+        
+        cost += buffer;
+
+        require(cost > 0, "Cost calculation error");
+
+        return cost;
+    }
+
+
+    function setCommissionRate(uint256 newRate) external onlyOwner {
+        require(
+            newRate <= MAX_COMMISSION_RATE,
+            "Commission rate exceeds maximum commision rate of 2%"
+        );
+        commissionRate = newRate;
     }
 }

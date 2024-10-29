@@ -138,7 +138,6 @@ contract SnedPayment is ReentrancyGuard, Ownable, Pausable {
             address tokenAddress
         ) = _completeTransfer(encodedVm);
 
-
         uint256 amountOut;
         address tokenOut;
 
@@ -291,6 +290,19 @@ contract SnedPayment is ReentrancyGuard, Ownable, Pausable {
         IERC20(token).safeTransfer(owner(), amount);
     }
 
+    function updateOwner(address newOwner) external onlyOwner {
+        require(newOwner != address(0), "New owner cannot be the zero address");
+        transferOwnership(newOwner);
+    }
+
+    function setCommissionRate(uint256 newRate) external onlyOwner {
+        require(
+            newRate <= MAX_COMMISSION_RATE,
+            "Commission rate exceeds maximum commision rate of 2%"
+        );
+        commissionRate = newRate;
+    }
+
     function pause() external onlyOwner {
         _pause();
     }
@@ -303,14 +315,22 @@ contract SnedPayment is ReentrancyGuard, Ownable, Pausable {
         return nonce++;
     }
 
-    function _calculateGasFee(uint256 gasUsed, uint256 gasPrice) private view returns (uint256 cost) {
+    function _calculateGasFee(
+        uint256 gasUsed,
+        uint256 gasPrice
+    ) private view returns (uint256 cost) {
         uint256 gasCostInWei;
         unchecked {
             gasCostInWei = gasUsed * gasPrice;
         }
-        require(gasPrice == 0 || gasCostInWei / gasPrice == gasUsed, "Gas cost calculation overflow");
+        require(
+            gasPrice == 0 || gasCostInWei / gasPrice == gasUsed,
+            "Gas cost calculation overflow"
+        );
 
-        PythStructs.Price memory pythPrice = pythContract.getPriceUnsafe(priceId);
+        PythStructs.Price memory pythPrice = pythContract.getPriceUnsafe(
+            priceId
+        );
 
         int64 price = pythPrice.price;
         int32 expo = pythPrice.expo;
@@ -319,35 +339,30 @@ contract SnedPayment is ReentrancyGuard, Ownable, Pausable {
         require(expo <= 0, "Invalid price exponent");
 
         uint256 gasUsdPrice = uint256(uint64(price));
-        
+
         uint256 scalingFactor = 10 ** uint32(-expo);
-        gasUsdPrice = (gasUsdPrice * 1e18) / scalingFactor;
+        gasUsdPrice = (gasUsdPrice * 1e8) / scalingFactor;
 
         uint256 intermediateResult;
         unchecked {
             intermediateResult = gasCostInWei * gasUsdPrice;
         }
-        require(gasUsdPrice == 0 || intermediateResult / gasUsdPrice == gasCostInWei, "USD conversion overflow");
+        require(
+            gasUsdPrice == 0 ||
+                intermediateResult / gasUsdPrice == gasCostInWei,
+            "USD conversion overflow"
+        );
 
-        uint256 gasCost = intermediateResult / 1e18;
+        uint256 gasCost = intermediateResult / 1e8;
 
         cost = gasCost / 1e12;
 
         uint256 buffer = (cost * 10) / 100;
-        
+
         cost += buffer;
 
         require(cost > 0, "Cost calculation error");
 
         return cost;
-    }
-
-
-    function setCommissionRate(uint256 newRate) external onlyOwner {
-        require(
-            newRate <= MAX_COMMISSION_RATE,
-            "Commission rate exceeds maximum commision rate of 2%"
-        );
-        commissionRate = newRate;
     }
 }
